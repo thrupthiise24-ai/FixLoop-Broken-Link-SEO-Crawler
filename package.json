@@ -1,0 +1,16 @@
+{
+  "name": "broken-link-seo-crawler",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "server": "npm --workspace=server run dev",
+    "web": "npm --workspace=web run dev",
+    "test": "npm --workspace=server test",
+    "test:detectors": "npm --workspace=server run test:detectors",
+    "test:crawl": "node --import tsx scripts/test-crawl.ts"
+  }
+}
