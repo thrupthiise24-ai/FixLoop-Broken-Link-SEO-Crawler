@@ -1,4 +1,3 @@
-
 {
   "name": "fixloop-broken-link-seo-crawler",
   "version": "1.0.0",
@@ -10,6 +9,8 @@
     "build:api": "npm --prefix server run build",
     "build:all": "npm --prefix server run build && npm --prefix web run build",
     "test:api": "npm --prefix server test",
-    "test:demo": "npm --prefix server run test:demo"
+    "test:demo": "npm --prefix server run test:demo",
+    "test:detectors": "npm --prefix server run test:detectors",
+    "test:crawl": "npm --prefix server run test:crawl"
   }
 }
