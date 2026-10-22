@@ -1,150 +1,142 @@
-import { Page } from '../../../shared/types.js';
+import type { CrawlPlan, NotCrawledPage, PlannedPage } from "../../../shared/types";
+import type { RobotsPolicy } from "../crawler/robots";
+import { getPathScope, isSameOrigin, isWithinPathScope, normalizeSiteUrl, normalizeUrl } from "../crawler/normalizeUrl";
+import { PriorityQueue, type QueueItem } from "../crawler/queue";
+import type { PageDocumentLoader } from "../crawler/auditEngine";
 
-export interface PriorityEvaluation {
-  score: number;
-  reason: string;
+interface PlanCandidate extends QueueItem {
+  parentUrl: string;
 }
 
-export interface PlanSummary {
-  siteUrl: string;
-  pageLimit: number;
-  plannedCount: number;
-  skippedCount: number;
-  prioritizedPages: Array<{
-    url: string;
-    depth: number;
-    priority: number;
-    priorityReason: string;
-  }>;
-  notCrawledList: Array<{
-    url: string;
-    depth: number;
-    reason: string;
-  }>;
+function priorityFor(candidate: {
+  url: string;
+  depth: number;
+  inboundCount: number;
+  isNavigation: boolean;
+  startUrl: string;
+}): { priority: number; reason: string } {
+  if (candidate.url === candidate.startUrl) {
+    return { priority: 1000, reason: "Seed URL: the site entry point is crawled first." };
+  }
+  const depthScore = Math.max(0, 100 - candidate.depth * 8);
+  const inboundScore = Math.min(candidate.inboundCount, 20) * 3;
+  if (candidate.isNavigation) {
+    return {
+      priority: 800 + depthScore + inboundScore,
+      reason: `Navigation link, depth ${candidate.depth}, ${candidate.inboundCount} inbound link(s).`,
+    };
+  }
+  return {
+    priority: 400 + depthScore + inboundScore,
+    reason: `Depth ${candidate.depth}, ${candidate.inboundCount} inbound link(s).`,
+  };
 }
 
-export class Planner {
-  private pageLimit: number;
+/**
+ * Crawl a small discovery frontier, rank its pages, and return every known page
+ * that could not fit the requested cap. The loader caches fetched pages for the
+ * following crawl phase so the planning pass does not double-fetch them.
+ */
+export async function planSite(
+  rawSiteUrl: string,
+  pageLimit: number,
+  loadPage: PageDocumentLoader,
+  robots: RobotsPolicy,
+): Promise<CrawlPlan> {
+  const startUrl = normalizeSiteUrl(rawSiteUrl);
+  const origin = new URL(startUrl).origin;
+  const scopePath = getPathScope(startUrl);
+  const queue = new PriorityQueue<PlanCandidate>();
+  const queued = new Set<string>();
+  const visited = new Set<string>();
+  const inboundCounts = new Map<string, number>();
+  const navLinks = new Set<string>();
+  const notCrawled: NotCrawledPage[] = [];
+  const pages: PlannedPage[] = [];
+  const candidateData = new Map<string, { depth: number; parentUrl: string }>();
 
-  constructor(pageLimit: number = 200) {
-    this.pageLimit = pageLimit;
+  const seedPriority = priorityFor({
+    url: startUrl,
+    depth: 0,
+    inboundCount: 0,
+    isNavigation: false,
+    startUrl,
+  });
+  queue.push({ url: startUrl, depth: 0, priority: seedPriority.priority, priorityReason: seedPriority.reason, parentUrl: startUrl });
+  queued.add(startUrl);
+  candidateData.set(startUrl, { depth: 0, parentUrl: startUrl });
+
+  while (queue.size > 0 && pages.length < pageLimit) {
+    const candidate = queue.pop();
+    if (!candidate || visited.has(candidate.url)) continue;
+    visited.add(candidate.url);
+
+    const decision = await robots.isAllowed(candidate.url);
+    if (!decision.allowed) {
+      notCrawled.push({ url: candidate.url, reason: decision.reason });
+      continue;
+    }
+
+    const document = await loadPage(candidate.url);
+    pages.push({
+      url: candidate.url,
+      depth: candidate.depth,
+      priority: candidate.priority,
+      priorityReason: candidate.priorityReason,
+      status: "planned",
+    });
+
+    for (const link of document.parsed.links) {
+      if (!link.internal || !isSameOrigin(link.url, origin) || !isWithinPathScope(link.url, scopePath)) continue;
+      if (link.url === candidate.url) continue;
+
+      const nextDepth = candidate.depth + 1;
+      const nextInbound = (inboundCounts.get(link.url) ?? 0) + 1;
+      inboundCounts.set(link.url, nextInbound);
+      if (link.isNavigation) navLinks.add(link.url);
+      const isNavigation = navLinks.has(link.url);
+      const score = priorityFor({
+        url: link.url,
+        depth: nextDepth,
+        inboundCount: nextInbound,
+        isNavigation,
+        startUrl,
+      });
+      const existing = candidateData.get(link.url);
+      const depth = existing ? Math.min(existing.depth, nextDepth) : nextDepth;
+      const parentUrl = existing?.parentUrl ?? candidate.url;
+      candidateData.set(link.url, { depth, parentUrl });
+      if (!visited.has(link.url)) {
+        queued.add(link.url);
+        queue.push({
+          url: link.url,
+          depth,
+          priority: score.priority,
+          priorityReason: score.reason,
+          isNavigation,
+          parentUrl,
+        });
+      }
+    }
   }
 
-  /**
-   * Computes an agentic priority score and explanation for why a page should be crawled earlier.
-   */
-  public evaluatePriority(
-    url: string,
-    depth: number,
-    isNav: boolean = false,
-    inboundCount: number = 1
-  ): PriorityEvaluation {
-    let score = 500;
-    const reasons: string[] = [];
-
-    // Root/home page evaluation
-    let pathname = '/';
-    try {
-      pathname = new URL(url).pathname;
-    } catch {}
-
-    if (depth === 0 || pathname === '/' || pathname === '') {
-      score += 500;
-      reasons.push('Root home page (highest crawl priority)');
-      return { score, reason: reasons.join('; ') };
-    }
-
-    // Depth penalty: shallower pages have higher priority
-    const depthPenalty = depth * 60;
-    score -= depthPenalty;
-    reasons.push(`Depth level ${depth} (-${depthPenalty} pts)`);
-
-    // Navigation links bonus
-    if (isNav) {
-      score += 200;
-      reasons.push('Navigation/header link (+200 pts)');
-    }
-
-    // Inbound popularity bonus
-    if (inboundCount > 1) {
-      const inboundBonus = Math.min((inboundCount - 1) * 15, 150);
-      score += inboundBonus;
-      reasons.push(`Referenced by ${inboundCount} pages (+${inboundBonus} pts)`);
-    }
-
-    // Key architectural pages bonus
-    const keyPatterns = ['/about', '/pricing', '/contact', '/docs', '/blog', '/products', '/features'];
-    if (keyPatterns.some((pattern) => pathname.toLowerCase().startsWith(pattern))) {
-      score += 50;
-      reasons.push('Core marketing/documentation path (+50 pts)');
-    }
-
-    // Deep pagination or utility pages penalty
-    if (pathname.includes('/page/') || pathname.includes('/tag/') || pathname.includes('?page=')) {
-      score -= 80;
-      reasons.push('Deep archive/pagination path (-80 pts)');
-    }
-
-    return {
-      score: Math.max(score, 1),
-      reason: reasons.join('; '),
-    };
+  for (const candidate of queue.values()) {
+    if (!queued.has(candidate.url) || visited.has(candidate.url)) continue;
+    notCrawled.push({
+      url: candidate.url,
+      reason: `Page limit reached (${pageLimit} pages); ranked below the selected crawl plan.`,
+    });
   }
 
-  /**
-   * Applies the page limit (e.g. TC3 crawl limit of 200 pages) and records the not-crawled list.
-   */
-  public partitionByLimit(
-    items: Array<{
-      url: string;
-      depth: number;
-      priority: number;
-      priorityReason: string;
-    }>,
-    alreadyCrawledCount: number = 0
-  ): {
-    canCrawl: Array<{
-      url: string;
-      depth: number;
-      priority: number;
-      priorityReason: string;
-    }>;
-    notCrawled: Array<{
-      url: string;
-      depth: number;
-      reason: string;
-    }>;
-  } {
-    const remainingSlots = Math.max(this.pageLimit - alreadyCrawledCount, 0);
-
-    const canCrawl = items.slice(0, remainingSlots);
-    const notCrawled = items.slice(remainingSlots).map((item) => ({
-      url: item.url,
-      depth: item.depth,
-      reason: `Crawl page limit of ${this.pageLimit} reached. Page ranked #${items.indexOf(item) + 1} with priority score ${item.priority}.`,
-    }));
-
-    return { canCrawl, notCrawled };
+  // A URL can be discovered repeatedly from separate pages; report it once.
+  const uniqueNotCrawled = new Map<string, NotCrawledPage>();
+  for (const item of notCrawled) {
+    if (!item.url || pages.some((page) => page.url === item.url)) continue;
+    if (!uniqueNotCrawled.has(item.url)) uniqueNotCrawled.set(item.url, item);
   }
 
-  /**
-   * Formats a page entity ready for DB persistence.
-   */
-  public createPlannedPage(
-    runId: string,
-    url: string,
-    depth: number,
-    priority: number,
-    priorityReason: string
-  ): Page {
-    return {
-      id: crypto.randomUUID(),
-      run_id: runId,
-      url,
-      depth,
-      priority,
-      priority_reason: priorityReason,
-      crawled: false,
-    };
-  }
+  return {
+    pages,
+    notCrawled: Array.from(uniqueNotCrawled.values()),
+  };
 }

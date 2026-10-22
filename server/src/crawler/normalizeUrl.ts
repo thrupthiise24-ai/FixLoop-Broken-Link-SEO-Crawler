@@ -1,108 +1,50 @@
-export interface UrlInfo {
-  isValid: boolean;
-  isCrawlable: boolean;
-  normalizedUrl?: string;
-  isInternal: boolean;
-  reason?: string;
-}
+const NON_HTTP_SCHEMES = /^(?:mailto:|tel:|javascript:|data:|blob:)/i;
 
-const NON_CRAWLABLE_SCHEMES = [
-  'mailto:',
-  'tel:',
-  'javascript:',
-  'sms:',
-  'data:',
-  'ftp:',
-  'file:',
-  'blob:',
-];
-
-/**
- * Normalizes a URL against a base URL and determines if it is internal and crawlable.
- */
-export function normalizeUrl(rawUrl: string, baseUrl: string): UrlInfo {
-  if (!rawUrl || typeof rawUrl !== 'string') {
-    return { isValid: false, isCrawlable: false, isInternal: false, reason: 'Empty or non-string URL' };
-  }
-
-  const trimmed = rawUrl.trim();
-
-  // Check for non-crawlable schemes
-  const lower = trimmed.toLowerCase();
-  for (const scheme of NON_CRAWLABLE_SCHEMES) {
-    if (lower.startsWith(scheme)) {
-      return {
-        isValid: true,
-        isCrawlable: false,
-        isInternal: false,
-        reason: `Ignored protocol scheme (${scheme})`,
-      };
-    }
-  }
-
-  // Handle fragment-only URLs like "#top"
-  if (trimmed.startsWith('#')) {
-    return {
-      isValid: true,
-      isCrawlable: false,
-      isInternal: true,
-      reason: 'Fragment-only anchor',
-    };
-  }
-
+/** Resolve an href and remove fragments; return null for non-page schemes. */
+export function normalizeUrl(input: string, baseUrl?: string): string | null {
+  const value = input.trim();
+  if (!value || value.startsWith("#") || NON_HTTP_SCHEMES.test(value)) return null;
   try {
-    const base = new URL(baseUrl);
-    const resolved = new URL(trimmed, base);
-
-    // Only support http: and https: protocols
-    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') {
-      return {
-        isValid: false,
-        isCrawlable: false,
-        isInternal: false,
-        reason: `Unsupported protocol: ${resolved.protocol}`,
-      };
-    }
-
-    // Strip hash fragment because it points to the same document
-    resolved.hash = '';
-
-    // Standardize pathname: remove duplicate slashes
-    resolved.pathname = resolved.pathname.replace(/\/{2,}/g, '/');
-
-    // Remove trailing slash if not root path (e.g. /about/ -> /about) to avoid duplicate crawls
-    if (resolved.pathname.length > 1 && resolved.pathname.endsWith('/')) {
-      resolved.pathname = resolved.pathname.slice(0, -1);
-    }
-
-    const normalizedUrl = resolved.toString();
-    const isInternal = resolved.hostname === base.hostname;
-
-    return {
-      isValid: true,
-      isCrawlable: true,
-      normalizedUrl,
-      isInternal,
-    };
-  } catch (err: any) {
-    return {
-      isValid: false,
-      isCrawlable: false,
-      isInternal: false,
-      reason: `Malformed URL: ${err.message}`,
-    };
+    const url = baseUrl ? new URL(value, baseUrl) : new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (url.username || url.password) return null;
+    url.hash = "";
+    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/$/, "");
+    return url.toString();
+  } catch {
+    return null;
   }
 }
 
-/**
- * Checks if a target URL is internal relative to a base site URL.
- */
-export function isInternalUrl(targetUrl: string, siteUrl: string): boolean {
+export function isSameOrigin(left: string, right: string): boolean {
   try {
-    const target = new URL(targetUrl);
-    const site = new URL(siteUrl);
-    return target.hostname === site.hostname;
+    return new URL(left).origin === new URL(right).origin;
   } catch {
     return false;
   }
+}
+
+export function getPathScope(siteUrl: string): string {
+  try {
+    const pathname = new URL(siteUrl).pathname.replace(/\/+$/, "");
+    return pathname === "" || pathname === "/" ? "/" : pathname;
+  } catch {
+    return "/";
+  }
+}
+
+export function isWithinPathScope(url: string, scopePath: string): boolean {
+  try {
+    if (scopePath === "/") return true;
+    const path = new URL(url).pathname;
+    return path === scopePath || path.startsWith(`${scopePath}/`);
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeSiteUrl(siteUrl: string): string {
+  const normalized = normalizeUrl(siteUrl);
+  if (!normalized) throw new Error("A valid HTTP or HTTPS site URL is required.");
+  return normalized;
 }

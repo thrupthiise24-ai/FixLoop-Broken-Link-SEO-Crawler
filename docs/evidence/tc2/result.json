@@ -1,0 +1,16 @@
+{
+  "id": "TC2",
+  "name": "Detect three-hop redirect chain",
+  "input": "http://127.0.0.1:3002/demo/old → /a → /b → /final.",
+  "expected": "Flag the link and retain all redirect URLs for evidence.",
+  "actual": "Flagged a chain with 3 redirect hop(s).",
+  "status": "PASS",
+  "evidence": [
+    "http://127.0.0.1:3002/demo/old",
+    "http://127.0.0.1:3002/demo/a",
+    "http://127.0.0.1:3002/demo/b",
+    "http://127.0.0.1:3002/demo/final"
+  ],
+  "runId": "5ebbee90-0557-4ac5-82c3-96d91a7fffcc",
+  "generatedAt": "2026-10-22T14:45:01.931Z"
+}

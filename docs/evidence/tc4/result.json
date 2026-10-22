@@ -1,0 +1,18 @@
+{
+  "id": "TC4",
+  "name": "Recheck and close only after a fix",
+  "input": "Approve the TC1 issue, turn on the demo fix, and recheck it.",
+  "expected": "Keep it open while broken; mark it fixed/closed only after the target returns HTTP 200.",
+  "actual": "Before fix: HTTP 404; after fix: HTTP 200; issue status: fixed.",
+  "status": "PASS",
+  "evidence": [
+    "Issue ID: 36e3f99f-c93b-4e23-9a25-8705231ed5ba",
+    "Before status: HTTP 404",
+    "Fix toggle changed state: true",
+    "After status: HTTP 200",
+    "Final issue state: fixed",
+    "Tracker state: closed"
+  ],
+  "runId": "5ebbee90-0557-4ac5-82c3-96d91a7fffcc",
+  "generatedAt": "2026-10-22T14:45:01.961Z"
+}

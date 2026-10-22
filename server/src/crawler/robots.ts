@@ -1,138 +1,102 @@
-export interface RobotsRule {
-  userAgent: string;
-  disallow: string[];
-  allow: string[];
+import { PoliteFetcher } from "./fetcher";
+
+interface RobotsRule {
+  allow: boolean;
+  pattern: string;
 }
 
-export class RobotsParser {
-  private rules: RobotsRule[] = [];
-  private sitemaps: string[] = [];
+interface RobotsPolicyData {
+  rules: RobotsRule[];
+  denyAll: boolean;
+  crawlDelayMs: number;
+}
 
-  constructor(content?: string) {
-    if (content) {
-      this.parse(content);
-    }
-  }
+export interface RobotsDecision {
+  allowed: boolean;
+  reason: string;
+}
 
-  public static async loadFromSite(siteUrl: string, fetchFn?: (url: string) => Promise<{ statusCode: number; bodyText?: string }>): Promise<RobotsParser> {
-    try {
-      const robotsUrl = new URL('/robots.txt', siteUrl).toString();
-      let text = '';
-      if (fetchFn) {
-        const res = await fetchFn(robotsUrl);
-        if (res.statusCode === 200 && res.bodyText) {
-          text = res.bodyText;
-        }
-      } else {
-        const res = await fetch(robotsUrl);
-        if (res.status === 200) {
-          text = await res.text();
-        }
+function parseRobots(text: string): RobotsPolicyData {
+  const lines = text.split(/\r?\n/).map((line) => line.split("#", 1)[0].trim());
+  const rules: RobotsRule[] = [];
+  let active = false;
+  let hasDirective = false;
+  let crawlDelayMs = 0;
+
+  for (const line of lines) {
+    if (!line || !line.includes(":")) continue;
+    const [rawName, ...rawValue] = line.split(":");
+    const name = rawName.trim().toLowerCase();
+    const value = rawValue.join(":").trim();
+    if (name === "user-agent") {
+      if (hasDirective) {
+        active = false;
+        hasDirective = false;
       }
-      return new RobotsParser(text);
-    } catch {
-      // Default to permissive if robots.txt cannot be fetched
-      return new RobotsParser('');
+      const agent = value.toLowerCase();
+      active = agent === "*" || agent.includes("fixloopbot");
+      continue;
+    }
+    if (name === "allow" || name === "disallow") {
+      hasDirective = true;
+      if (active && value) rules.push({ allow: name === "allow", pattern: value });
+      continue;
+    }
+    if (name === "crawl-delay" && active) {
+      const seconds = Number(value);
+      if (Number.isFinite(seconds) && seconds >= 0) crawlDelayMs = Math.min(seconds * 1000, 30000);
     }
   }
+  return { rules, denyAll: false, crawlDelayMs };
+}
 
-  public parse(content: string): void {
-    this.rules = [];
-    this.sitemaps = [];
+function ruleMatches(pattern: string, path: string): boolean {
+  const anchoredEnd = pattern.endsWith("$");
+  const source = anchoredEnd ? pattern.slice(0, -1) : pattern;
+  const escaped = source
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  const suffix = anchoredEnd ? "" : ".*";
+  return new RegExp(`^${escaped}${suffix}`).test(path);
+}
 
-    const lines = content.split(/\r?\n/);
-    let currentAgents: string[] = [];
+export class RobotsPolicy {
+  private readonly cache = new Map<string, Promise<RobotsPolicyData>>();
 
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith('#')) continue;
+  constructor(private readonly fetcher: PoliteFetcher) {}
 
-      const colonIdx = line.indexOf(':');
-      if (colonIdx === -1) continue;
+  async isAllowed(url: string): Promise<RobotsDecision> {
+    const parsed = new URL(url);
+    const policy = await this.load(parsed.origin);
+    if (policy.denyAll) return { allowed: false, reason: "robots.txt could not be read safely." };
 
-      const directive = line.slice(0, colonIdx).trim().toLowerCase();
-      const value = line.slice(colonIdx + 1).trim();
+    const path = `${parsed.pathname}${parsed.search}`;
+    const matches = policy.rules
+      .filter((rule) => ruleMatches(rule.pattern, path))
+      .sort((left, right) => right.pattern.length - left.pattern.length);
+    if (matches.length === 0) return { allowed: true, reason: "No matching robots.txt rule." };
+    const rule = matches[0];
+    return rule.allow
+      ? { allowed: true, reason: `Allowed by robots.txt rule ${rule.pattern}.` }
+      : { allowed: false, reason: `Disallowed by robots.txt rule ${rule.pattern}.` };
+  }
 
-      if (directive === 'user-agent') {
-        const agent = value.toLowerCase();
-        currentAgents = [agent];
-        let existing = this.rules.find((r) => r.userAgent === agent);
-        if (!existing) {
-          this.rules.push({ userAgent: agent, disallow: [], allow: [] });
-        }
-      } else if (directive === 'disallow') {
-        if (value) {
-          for (const agent of currentAgents) {
-            let rule = this.rules.find((r) => r.userAgent === agent);
-            if (!rule) {
-              rule = { userAgent: agent, disallow: [], allow: [] };
-              this.rules.push(rule);
-            }
-            rule.disallow.push(value);
-          }
-        }
-      } else if (directive === 'allow') {
-        if (value) {
-          for (const agent of currentAgents) {
-            let rule = this.rules.find((r) => r.userAgent === agent);
-            if (!rule) {
-              rule = { userAgent: agent, disallow: [], allow: [] };
-              this.rules.push(rule);
-            }
-            rule.allow.push(value);
-          }
-        }
-      } else if (directive === 'sitemap') {
-        this.sitemaps.push(value);
+  private load(origin: string): Promise<RobotsPolicyData> {
+    const existing = this.cache.get(origin);
+    if (existing) return existing;
+    const promise = this.fetcher.fetch(new URL("/robots.txt", origin).toString()).then((result) => {
+      if (result.statusCode === 404 || result.statusCode === 410) {
+        return { rules: [], denyAll: false, crawlDelayMs: 0 };
       }
-    }
-  }
-
-  public isAllowed(url: string, userAgent: string = '*'): boolean {
-    if (this.rules.length === 0) return true;
-
-    let path: string;
-    try {
-      const parsed = new URL(url);
-      path = parsed.pathname + parsed.search;
-    } catch {
-      path = url;
-    }
-
-    const agentLower = userAgent.toLowerCase();
-    const specificRule = this.rules.find((r) => r.userAgent === agentLower);
-    const wildcardRule = this.rules.find((r) => r.userAgent === '*');
-
-    const effectiveRule = specificRule || wildcardRule;
-    if (!effectiveRule) return true;
-
-    // Check allow rules first (most specific match)
-    for (const allowedPath of effectiveRule.allow) {
-      if (this.matchesPath(path, allowedPath)) {
-        return true;
+      if (result.statusCode === null || result.statusCode >= 500 || result.outcome === "timeout") {
+        return { rules: [], denyAll: true, crawlDelayMs: 0 };
       }
-    }
-
-    // Check disallow rules
-    for (const disallowedPath of effectiveRule.disallow) {
-      if (this.matchesPath(path, disallowedPath)) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  private matchesPath(targetPath: string, rulePattern: string): boolean {
-    if (rulePattern === '/') return true;
-    if (rulePattern.endsWith('$')) {
-      const pattern = rulePattern.slice(0, -1);
-      return targetPath === pattern;
-    }
-    return targetPath.startsWith(rulePattern);
-  }
-
-  public getSitemaps(): string[] {
-    return this.sitemaps;
+      if (result.statusCode >= 400) return { rules: [], denyAll: false, crawlDelayMs: 0 };
+      const policy = parseRobots(result.body);
+      this.fetcher.setOriginCrawlDelay(origin, policy.crawlDelayMs);
+      return policy;
+    }).catch(() => ({ rules: [], denyAll: true, crawlDelayMs: 0 }));
+    this.cache.set(origin, promise);
+    return promise;
   }
 }

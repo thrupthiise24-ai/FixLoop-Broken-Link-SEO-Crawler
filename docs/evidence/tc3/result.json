@@ -1,0 +1,21 @@
+{
+  "id": "TC3",
+  "name": "Respect the 200-page crawl limit",
+  "input": "Crawl the generated 260+ page demo site with a 200-page limit.",
+  "expected": "Crawl no more than 200 pages and list the pages not visited because of the limit.",
+  "actual": "Crawled 200/200; 269 pages discovered; 69 listed as not crawled.",
+  "status": "PASS",
+  "evidence": [
+    "Crawled pages: 200",
+    "Configured limit: 200",
+    "Discovered pages: 269",
+    "Not-crawled pages: 69",
+    "http://127.0.0.1:3002/demo/pages/page-38: Page limit reached (200 pages); ranked below the selected crawl plan.",
+    "http://127.0.0.1:3002/demo/pages/page-39: Page limit reached (200 pages); ranked below the selected crawl plan.",
+    "http://127.0.0.1:3002/demo/pages/page-4: Page limit reached (200 pages); ranked below the selected crawl plan.",
+    "http://127.0.0.1:3002/demo/pages/page-40: Page limit reached (200 pages); ranked below the selected crawl plan.",
+    "http://127.0.0.1:3002/demo/pages/page-41: Page limit reached (200 pages); ranked below the selected crawl plan."
+  ],
+  "runId": "5ebbee90-0557-4ac5-82c3-96d91a7fffcc",
+  "generatedAt": "2026-10-22T14:45:01.931Z"
+}

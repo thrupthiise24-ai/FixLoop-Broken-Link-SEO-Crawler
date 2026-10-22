@@ -3,106 +3,42 @@ export interface QueueItem {
   depth: number;
   priority: number;
   priorityReason: string;
-  inboundCount: number;
-  isNav: boolean;
-  discoveredFrom?: string;
+  isNavigation?: boolean;
 }
 
-export class CrawlQueue {
-  private queue: QueueItem[] = [];
-  private enqueuedUrls: Map<string, QueueItem> = new Map();
-  private visitedUrls: Set<string> = new Set();
+/** Small priority queue: highest score first, then shallower depth, then URL. */
+export class PriorityQueue<T extends QueueItem> {
+  private readonly items = new Map<string, T>();
 
-  /**
-   * Pushes an item to the queue or updates priority/inbound count if already pending.
-   */
-  public push(item: QueueItem): boolean {
-    const normalized = item.url;
+  get size(): number {
+    return this.items.size;
+  }
 
-    if (this.visitedUrls.has(normalized)) {
-      return false;
+  has(url: string): boolean {
+    return this.items.has(url);
+  }
+
+  push(item: T): void {
+    const existing = this.items.get(item.url);
+    if (!existing || item.priority > existing.priority) {
+      this.items.set(item.url, item);
     }
+  }
 
-    const existing = this.enqueuedUrls.get(normalized);
-    if (existing) {
-      // If found again via another link, increase inbound count
-      existing.inboundCount += 1;
-      // Upgrade priority if found with a higher priority or shallower depth
-      if (item.priority > existing.priority) {
-        existing.priority = item.priority;
-        existing.priorityReason = item.priorityReason;
-      }
-      if (item.depth < existing.depth) {
-        existing.depth = item.depth;
-      }
-      if (item.isNav) {
-        existing.isNav = true;
-      }
-      this.reSort();
-      return false;
+  pop(): T | undefined {
+    let best: T | undefined;
+    for (const item of this.items.values()) {
+      if (!best || this.compare(item, best) < 0) best = item;
     }
-
-    this.queue.push(item);
-    this.enqueuedUrls.set(normalized, item);
-    this.reSort();
-    return true;
+    if (best) this.items.delete(best.url);
+    return best;
   }
 
-  /**
-   * Sorts queue in descending order of priority (highest score first).
-   * Tie-breaker: shallower depth first, then higher inbound count.
-   */
-  private reSort(): void {
-    this.queue.sort((a, b) => {
-      if (b.priority !== a.priority) {
-        return b.priority - a.priority;
-      }
-      if (a.depth !== b.depth) {
-        return a.depth - b.depth;
-      }
-      return b.inboundCount - a.inboundCount;
-    });
+  values(): T[] {
+    return Array.from(this.items.values()).sort((left, right) => this.compare(left, right));
   }
 
-  /**
-   * Pops the highest priority item from the queue and marks it as visited.
-   */
-  public pop(): QueueItem | undefined {
-    const item = this.queue.shift();
-    if (item) {
-      this.enqueuedUrls.delete(item.url);
-      this.visitedUrls.add(item.url);
-    }
-    return item;
-  }
-
-  public peek(): QueueItem | undefined {
-    return this.queue[0];
-  }
-
-  public isVisited(url: string): boolean {
-    return this.visitedUrls.has(url);
-  }
-
-  public isEnqueued(url: string): boolean {
-    return this.enqueuedUrls.has(url);
-  }
-
-  public size(): number {
-    return this.queue.length;
-  }
-
-  public visitedCount(): number {
-    return this.visitedUrls.size;
-  }
-
-  public getPendingItems(): QueueItem[] {
-    return [...this.queue];
-  }
-
-  public clear(): void {
-    this.queue = [];
-    this.enqueuedUrls.clear();
-    this.visitedUrls.clear();
+  private compare(left: T, right: T): number {
+    return right.priority - left.priority || left.depth - right.depth || left.url.localeCompare(right.url);
   }
 }

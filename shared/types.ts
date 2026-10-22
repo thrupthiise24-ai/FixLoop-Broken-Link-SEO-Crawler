@@ -1,151 +1,200 @@
-export type RunStatus = 'pending' | 'running' | 'completed' | 'failed';
+/**
+ * Shared contracts between the crawler (Member A), agent/data layer (Member B),
+ * and the web app (Member C). Keep API JSON in snake_case at the HTTP boundary;
+ * TypeScript contracts use camelCase internally.
+ */
 
-export interface Run {
-  id: string;
-  site_url: string;
-  page_limit: number;
-  status: RunStatus;
-  started_at: string;
-  finished_at?: string | null;
-}
+export type IssueType =
+  | "broken_link"
+  | "redirect_chain"
+  | "missing_title"
+  | "duplicate_title"
+  | "missing_meta_description"
+  | "missing_h1"
+  | "missing_alt";
 
-export interface Page {
-  id: string;
-  run_id: string;
+export type IssueStatus =
+  | "pending_approval"
+  | "open"
+  | "fixed"
+  | "still_failing"
+  | "rejected"
+  | "uncertain";
+
+export type Severity = "high" | "medium" | "low";
+export type RunStatus = "queued" | "running" | "completed" | "failed";
+
+export interface PlannedPage {
   url: string;
   depth: number;
   priority: number;
-  priority_reason?: string;
-  status_code?: number | null;
-  title?: string | null;
-  meta_description?: string | null;
-  h1_count?: number;
-  h1_tags?: string[];
-  crawled_at?: string | null;
-  crawled: boolean;
-  not_crawled_reason?: string | null;
+  priorityReason: string;
+  status?: "planned" | "crawled" | "not_crawled";
 }
 
-export interface RedirectHop {
+export interface NotCrawledPage {
   url: string;
-  status_code: number;
-  location?: string | null;
+  reason: string;
 }
 
-export interface Link {
+export interface CrawlPlan {
+  /** Candidate pages, ranked highest priority first. */
+  pages: PlannedPage[];
+  /** Pages the planner already knows cannot fit in the configured limit. */
+  notCrawled: NotCrawledPage[];
+}
+
+export interface CrawlPage {
+  url: string;
+  depth: number;
+  priority?: number;
+  priorityReason?: string;
+  statusCode?: number | null;
+  title?: string | null;
+  metaDescription?: string | null;
+  h1Count?: number;
+  imagesMissingAlt?: string[];
+  crawledAt?: string;
+  crawled?: boolean;
+}
+
+export type LinkOutcome = "ok" | "error" | "timeout" | "unknown";
+
+export interface CrawledLink {
+  sourceUrl: string;
+  targetUrl: string;
+  statusCode?: number | null;
+  redirectChain?: string[];
+  checkedAt?: string;
+  outcome?: LinkOutcome;
+  internal?: boolean;
+  error?: string;
+}
+
+export interface CrawlSnapshot {
+  pages: CrawlPage[];
+  links: CrawledLink[];
+  /** Links/pages discovered but not visited, with a human-readable reason. */
+  notCrawled?: NotCrawledPage[];
+}
+
+/** Evidence supplied by one of the detector functions. */
+export interface DetectorFinding {
+  type: IssueType;
+  sourceUrl: string;
+  badUrl: string;
+  statusCode?: number | null;
+  redirectChain?: string[];
+  severity?: Severity;
+  checkedAt?: string;
+  outcome?: LinkOutcome;
+  /** True for a concrete detector match; false is reserved for re-checks. */
+  evidence?: Record<string, unknown>;
+  message?: string;
+}
+
+export interface RecheckResult {
+  outcome?: LinkOutcome;
+  statusCode?: number | null;
+  redirectChain?: string[];
+  title?: string | null;
+  metaDescription?: string | null;
+  h1Count?: number;
+  missingAltCount?: number;
+  /** Use this when the crawler/detector can directly decide whether the issue remains. */
+  stillPresent?: boolean;
+  checkedAt?: string;
+  error?: string;
+  evidence?: Record<string, unknown>;
+}
+
+export interface IssueDraft {
+  title: string;
+  description: string;
+  suggestedFix: string;
+}
+
+/**
+ * Adapter boundary for Member A's planner, crawler, and detectors.
+ * Member B's orchestrator owns ordering/persistence and enforces the limit;
+ * Member A owns how the pages and observations are fetched.
+ */
+export interface AuditEngine {
+  plan(siteUrl: string, pageLimit: number): Promise<CrawlPlan>;
+  crawl(plan: CrawlPlan, pageLimit: number): Promise<CrawlSnapshot>;
+  detect(snapshot: CrawlSnapshot): Promise<DetectorFinding[]> | DetectorFinding[];
+  /** Re-fetch the affected source page/link and return fresh evidence. */
+  recheck?(finding: DetectorFinding): Promise<RecheckResult>;
+}
+
+export interface Run {
   id: string;
-  run_id: string;
-  source_page_id: string;
-  source_page_url: string;
-  target_url: string;
-  status_code?: number | null;
-  redirect_chain?: RedirectHop[];
-  checked_at?: string;
-  error_message?: string | null;
-  is_internal: boolean;
+  siteUrl: string;
+  pageLimit: number;
+  permissionConfirmed: boolean;
+  status: RunStatus;
+  startedAt: string;
+  finishedAt: string | null;
+  crawledCount: number;
+  totalPages: number;
+  plan: PlannedPage[];
+  notCrawled: NotCrawledPage[];
+  error: string | null;
 }
 
-export type IssueType =
-  | 'broken_link'
-  | 'redirect_chain'
-  | 'missing_title'
-  | 'duplicate_title'
-  | 'missing_meta_description'
-  | 'missing_h1'
-  | 'multiple_h1'
-  | 'missing_alt';
-
-export type IssueSeverity = 'high' | 'medium' | 'low';
-
-export type IssueStatus =
-  | 'pending_approval'
-  | 'open'
-  | 'fixed'
-  | 'still_failing'
-  | 'rejected'
-  | 'uncertain';
-
-export interface EvidenceItem {
-  id?: string;
-  issue_id?: string;
+export interface Evidence {
+  id: string;
+  issueId: string;
+  runId: string | null;
   kind: string;
-  payload: Record<string, any>;
-  captured_at: string;
+  payload: Record<string, unknown>;
+  capturedAt: string;
 }
 
 export interface Issue {
   id: string;
-  run_id: string;
-  dedupe_key: string;
+  dedupeKey: string;
+  rootCauseKey: string;
   type: IssueType;
-  severity: IssueSeverity;
-  source_page_id: string;
-  source_page_url: string;
-  bad_url?: string | null;
+  severity: Severity;
   status: IssueStatus;
+  sourceUrl: string;
+  badUrl: string;
+  statusCode: number | null;
+  redirectChain: string[];
   title: string;
   description: string;
-  suggested_fix: string;
-  tracker_url?: string | null;
-  tracker_issue_id?: string | null;
-  evidence?: EvidenceItem[];
-  created_at: string;
-  approved_at?: string | null;
-  closed_at?: string | null;
+  suggestedFix: string;
+  trackerId: string | null;
+  trackerUrl: string | null;
+  trackerState: "not_filed" | "open" | "closed" | "close_failed";
+  approvedAt: string | null;
+  closedAt: string | null;
+  lastCheckedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  evidence?: Evidence[];
 }
 
-export interface PageParseResult {
-  url: string;
-  title?: string;
-  meta_description?: string;
-  h1_tags: string[];
-  links: Array<{
-    href: string;
-    text: string;
-    is_nav: boolean;
-  }>;
-  images: Array<{
-    src: string;
-    alt?: string;
-    has_alt: boolean;
-  }>;
-}
-
-export interface FetchResult {
-  finalUrl: string;
-  statusCode: number;
-  redirectChain: RedirectHop[];
-  contentType?: string | null;
-  bodyText?: string;
-  durationMs: number;
-  error?: string;
-}
-
-export interface DetectorEvidence {
-  kind: string;
-  payload: Record<string, any>;
-}
-
-export interface ProposedIssue {
+export interface IssueRootCauseGroup {
+  rootCauseKey: string;
   type: IssueType;
-  severity: IssueSeverity;
-  source_page_id: string;
-  source_page_url: string;
-  bad_url?: string;
-  title: string;
-  description: string;
-  suggested_fix: string;
-  evidence: DetectorEvidence[];
+  badUrl: string;
+  severity: Severity;
+  status: IssueStatus;
+  issueIds: string[];
+  sourcePages: string[];
+  sourceCount: number;
 }
 
-export interface DetectorContext {
-  page: Page;
-  parseResult?: PageParseResult;
-  links: Link[];
-  allPagesInRun?: Page[];
-}
-
-export interface Detector {
-  name: string;
-  detect(context: DetectorContext): ProposedIssue[];
+export interface TestCaseRecord {
+  id: number;
+  testCase: "TC1" | "TC2" | "TC3" | "TC4";
+  input: string;
+  expected: string;
+  actual: string;
+  passed: boolean;
+  evidence: string[];
+  notes: string | null;
+  createdAt: string;
 }

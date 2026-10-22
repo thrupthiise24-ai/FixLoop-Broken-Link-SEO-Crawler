@@ -1,60 +1,55 @@
-import { Detector, DetectorContext, ProposedIssue } from '../../../shared/types.js';
-import { BrokenLinksDetector } from './brokenLinks.js';
-import { RedirectChainsDetector } from './redirectChains.js';
-import { MissingTitleDetector } from './missingTitle.js';
-import { MetaDescriptionDetector } from './metaDescription.js';
-import { HeadingsDetector } from './headings.js';
-import { ImageAltDetector } from './imageAlt.js';
+import type { CrawlSnapshot, DetectorFinding } from "../../../shared/types";
+import { detectBrokenLinks } from "./brokenLinks";
+import { detectMissingH1 } from "./headings";
+import { detectMissingImageAlt } from "./imageAlt";
+import { detectMissingMetaDescriptions } from "./metaDescription";
+import { detectMissingTitles } from "./missingTitle";
+import { detectRedirectChains } from "./redirectChains";
 
-export {
-  BrokenLinksDetector,
-  RedirectChainsDetector,
-  MissingTitleDetector,
-  MetaDescriptionDetector,
-  HeadingsDetector,
-  ImageAltDetector,
-};
+export { detectBrokenLinks } from "./brokenLinks";
+export { detectMissingH1 } from "./headings";
+export { detectMissingImageAlt } from "./imageAlt";
+export { detectMissingMetaDescriptions } from "./metaDescription";
+export { detectMissingTitles } from "./missingTitle";
+export { detectRedirectChains } from "./redirectChains";
 
-export class DetectorRegistry {
-  private detectors: Detector[] = [];
-
-  constructor() {
-    this.registerDefaultDetectors();
+function detectDuplicateTitles(snapshot: CrawlSnapshot): DetectorFinding[] {
+  const titleGroups = new Map<string, typeof snapshot.pages>();
+  for (const page of snapshot.pages) {
+    if (page.statusCode == null || page.statusCode >= 400 || !page.title?.trim()) continue;
+    const title = page.title.trim().toLocaleLowerCase();
+    const group = titleGroups.get(title) ?? [];
+    group.push(page);
+    titleGroups.set(title, group);
   }
 
-  private registerDefaultDetectors(): void {
-    this.detectors.push(
-      new BrokenLinksDetector(),
-      new RedirectChainsDetector(),
-      new MissingTitleDetector(),
-      new MetaDescriptionDetector(),
-      new HeadingsDetector(),
-      new ImageAltDetector()
-    );
-  }
-
-  public register(detector: Detector): void {
-    this.detectors.push(detector);
-  }
-
-  public runAll(context: DetectorContext): ProposedIssue[] {
-    const allIssues: ProposedIssue[] = [];
-
-    for (const detector of this.detectors) {
-      try {
-        const issues = detector.detect(context);
-        allIssues.push(...issues);
-      } catch (err: any) {
-        console.error(`Detector ${detector.name} failed during evaluation:`, err);
-      }
+  const findings: DetectorFinding[] = [];
+  for (const [title, pages] of titleGroups) {
+    if (pages.length < 2) continue;
+    const sourceUrls = pages.map((page) => page.url);
+    for (const page of pages.slice(1)) {
+      findings.push({
+        type: "duplicate_title",
+        sourceUrl: page.url,
+        badUrl: page.url,
+        statusCode: page.statusCode,
+        severity: "medium",
+        checkedAt: page.crawledAt,
+        evidence: { title, duplicateSourcePages: sourceUrls },
+      });
     }
-
-    return allIssues;
   }
+  return findings;
 }
 
-export const defaultDetectorRegistry = new DetectorRegistry();
-
-export function runAllDetectors(context: DetectorContext): ProposedIssue[] {
-  return defaultDetectorRegistry.runAll(context);
+export function detectIssues(snapshot: CrawlSnapshot): DetectorFinding[] {
+  return [
+    ...detectBrokenLinks(snapshot),
+    ...detectRedirectChains(snapshot),
+    ...detectMissingTitles(snapshot),
+    ...detectDuplicateTitles(snapshot),
+    ...detectMissingMetaDescriptions(snapshot),
+    ...detectMissingH1(snapshot),
+    ...detectMissingImageAlt(snapshot),
+  ];
 }

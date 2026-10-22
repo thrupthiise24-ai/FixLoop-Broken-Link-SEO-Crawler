@@ -1,175 +1,275 @@
-import { FetchResult, RedirectHop } from '../../../shared/types.js';
+import type { LinkOutcome } from "../../../shared/types";
+import { normalizeUrl } from "./normalizeUrl";
 
-export interface FetchOptions {
-  timeoutMs?: number;
-  maxRedirects?: number;
-  maxRetries?: number;
-  retryDelayMs?: number;
-  userAgent?: string;
-  rateLimitMs?: number;
+export interface FetchResult {
+  requestedUrl: string;
+  finalUrl: string;
+  statusCode: number | null;
+  redirectChain: string[];
+  body: string;
+  contentType: string | null;
+  outcome: LinkOutcome;
+  error?: string;
+  checkedAt: string;
 }
 
-export class Fetcher {
-  private userAgent: string;
-  private timeoutMs: number;
-  private maxRedirects: number;
-  private maxRetries: number;
-  private retryDelayMs: number;
-  private rateLimitMs: number;
-  private lastRequestTime: number = 0;
+export interface FetcherOptions {
+  timeoutMs?: number;
+  maxRedirects?: number;
+  retries?: number;
+  rateLimitMs?: number;
+  maxBodyBytes?: number;
+  userAgent?: string;
+}
 
-  constructor(options: FetchOptions = {}) {
-    this.userAgent =
-      options.userAgent ||
-      'FixLoop-SEO-Crawler/1.0 (+https://github.com/fixloop/seo-crawler; bot@fixloop.dev)';
-    this.timeoutMs = options.timeoutMs ?? 10000;
+export interface FetchRequestOptions {
+  method?: "GET" | "HEAD";
+  /** Set false for status-only probes, including GET fallbacks for unsupported HEAD. */
+  readBody?: boolean;
+}
+
+const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
+
+async function readBodyLimited(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done || !value) break;
+    const remaining = maxBytes - size;
+    if (remaining <= 0) {
+      await reader.cancel();
+      break;
+    }
+    const chunk = value.byteLength > remaining ? value.slice(0, remaining) : value;
+    chunks.push(chunk);
+    size += chunk.byteLength;
+    if (chunk.byteLength < value.byteLength || size >= maxBytes) {
+      await reader.cancel();
+      break;
+    }
+  }
+  const buffer = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8").decode(buffer);
+}
+
+export class PoliteFetcher {
+  private readonly timeoutMs: number;
+  private readonly maxRedirects: number;
+  private readonly retries: number;
+  private readonly rateLimitMs: number;
+  private readonly maxBodyBytes: number;
+  private readonly userAgent: string;
+  private readonly lastRequestAt = new Map<string, number>();
+  private readonly originDelayMs = new Map<string, number>();
+  private readonly originTail = new Map<string, Promise<void>>();
+
+  constructor(options: FetcherOptions = {}) {
+    this.timeoutMs = options.timeoutMs ?? 5000;
     this.maxRedirects = options.maxRedirects ?? 10;
-    this.maxRetries = options.maxRetries ?? 2;
-    this.retryDelayMs = options.retryDelayMs ?? 500;
-    this.rateLimitMs = options.rateLimitMs ?? 50;
+    this.retries = options.retries ?? 1;
+    this.rateLimitMs = options.rateLimitMs ?? 20;
+    this.maxBodyBytes = options.maxBodyBytes ?? 1_500_000;
+    this.userAgent = options.userAgent ?? "FixLoopBot/1.0 (+authorized SEO audit)";
   }
 
-  /**
-   * Enforces a polite delay between requests to the same crawler instance.
-   */
-  private async applyRateLimit(): Promise<void> {
-    if (this.rateLimitMs <= 0) return;
-    const now = Date.now();
-    const elapsed = now - this.lastRequestTime;
-    if (elapsed < this.rateLimitMs) {
-      await new Promise((resolve) => setTimeout(resolve, this.rateLimitMs - elapsed));
-    }
-    this.lastRequestTime = Date.now();
+  setOriginCrawlDelay(origin: string, delayMs: number): void {
+    if (!Number.isFinite(delayMs) || delayMs < 0) return;
+    this.originDelayMs.set(origin, Math.max(this.originDelayMs.get(origin) ?? 0, delayMs));
   }
 
-  /**
-   * Fetches a single HTTP request with manual redirect tracking, timeout, and retry logic.
-   */
-  public async fetch(url: string): Promise<FetchResult> {
-    let attempts = 0;
-    let lastError: Error | null = null;
-
-    while (attempts <= this.maxRetries) {
-      try {
-        await this.applyRateLimit();
-        return await this.executeFetchWithRedirects(url);
-      } catch (err: any) {
-        lastError = err;
-        attempts++;
-        if (attempts <= this.maxRetries && this.isRetryable(err)) {
-          const delay = this.retryDelayMs * Math.pow(2, attempts - 1);
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        } else {
-          break;
-        }
-      }
+  async fetch(url: string, requestOptions: FetchRequestOptions = {}): Promise<FetchResult> {
+    const normalized = normalizeUrl(url);
+    if (!normalized) {
+      return this.errorResult(url, url, "error", "Only HTTP and HTTPS URLs can be fetched.");
     }
 
-    return {
-      finalUrl: url,
-      statusCode: 0,
-      redirectChain: [],
-      durationMs: 0,
-      error: lastError ? lastError.message : 'Unknown fetch error',
-    };
+    let last: FetchResult | undefined;
+    const method = requestOptions.method ?? "GET";
+    const readBody = method !== "HEAD" && (requestOptions.readBody ?? true);
+    for (let attempt = 0; attempt <= this.retries; attempt++) {
+      last = await this.fetchOnce(normalized, method, readBody);
+      const retryable = last.outcome === "timeout" ||
+        (last.statusCode !== null && last.statusCode >= 500) ||
+        (last.statusCode === null && last.outcome === "error");
+      if (!retryable || attempt >= this.retries) return last;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+    return last ?? this.errorResult(normalized, normalized, "error", "Fetch failed.");
   }
 
-  /**
-   * Executes manual hop-by-hop HTTP requests to capture every redirect in redirectChain.
-   */
-  private async executeFetchWithRedirects(initialUrl: string): Promise<FetchResult> {
-    const startTime = Date.now();
-    const redirectChain: RedirectHop[] = [];
-    let currentUrl = initialUrl;
-    const visitedUrls = new Set<string>();
+  private async fetchOnce(startUrl: string, method: "GET" | "HEAD", readBody: boolean): Promise<FetchResult> {
+    const checkedAt = new Date().toISOString();
+    const chain = [startUrl];
+    const visited = new Set<string>(chain);
+    let currentUrl = startUrl;
 
-    for (let hop = 0; hop <= this.maxRedirects; hop++) {
-      if (visitedUrls.has(currentUrl)) {
-        return {
-          finalUrl: currentUrl,
-          statusCode: 310, // Circular redirect
-          redirectChain,
-          durationMs: Date.now() - startTime,
-          error: `Redirect loop detected at ${currentUrl}`,
-        };
-      }
-      visitedUrls.add(currentUrl);
+    try {
+      for (let hop = 0; hop <= this.maxRedirects; hop++) {
+        const { response, body } = await this.requestHop(currentUrl, method, readBody);
 
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-
-      let response: Response;
-      try {
-        response = await fetch(currentUrl, {
-          method: 'GET',
-          redirect: 'manual', // DO NOT auto-follow: capture each hop
-          signal: controller.signal,
-          headers: {
-            'User-Agent': this.userAgent,
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-          },
-        });
-      } finally {
-        clearTimeout(timer);
-      }
-
-      const status = response.status;
-      const isRedirect = [301, 302, 303, 307, 308].includes(status);
-
-      if (isRedirect) {
-        const locationHeader = response.headers.get('location');
-        redirectChain.push({
-          url: currentUrl,
-          status_code: status,
-          location: locationHeader,
-        });
-
-        if (!locationHeader) {
-          return {
-            finalUrl: currentUrl,
-            statusCode: status,
-            redirectChain,
-            durationMs: Date.now() - startTime,
-            error: `Redirect status ${status} received without Location header`,
-          };
+        if (REDIRECT_CODES.has(response.status)) {
+          const location = response.headers.get("location");
+          if (!location) {
+            return {
+              requestedUrl: startUrl,
+              finalUrl: currentUrl,
+              statusCode: response.status,
+              redirectChain: chain,
+              body: "",
+              contentType: response.headers.get("content-type"),
+              outcome: "error",
+              error: `HTTP ${response.status} response had no Location header.`,
+              checkedAt,
+            };
+          }
+          const nextUrl = normalizeUrl(location, currentUrl);
+          if (!nextUrl) {
+            return {
+              requestedUrl: startUrl,
+              finalUrl: currentUrl,
+              statusCode: response.status,
+              redirectChain: chain,
+              body: "",
+              contentType: response.headers.get("content-type"),
+              outcome: "error",
+              error: "Redirect target was not an HTTP or HTTPS URL.",
+              checkedAt,
+            };
+          }
+          if (visited.has(nextUrl)) {
+            return {
+              requestedUrl: startUrl,
+              finalUrl: nextUrl,
+              statusCode: response.status,
+              redirectChain: [...chain, nextUrl],
+              body: "",
+              contentType: response.headers.get("content-type"),
+              outcome: "error",
+              error: "Redirect loop detected.",
+              checkedAt,
+            };
+          }
+          if (hop === this.maxRedirects) {
+            return {
+              requestedUrl: startUrl,
+              finalUrl: currentUrl,
+              statusCode: response.status,
+              redirectChain: chain,
+              body: "",
+              contentType: response.headers.get("content-type"),
+              outcome: "error",
+              error: `Redirect limit (${this.maxRedirects}) exceeded.`,
+              checkedAt,
+            };
+          }
+          currentUrl = nextUrl;
+          chain.push(currentUrl);
+          visited.add(currentUrl);
+          continue;
         }
 
-        // Resolve relative redirect locations
-        currentUrl = new URL(locationHeader, currentUrl).toString();
-      } else {
-        // Final destination reached
-        const contentType = response.headers.get('content-type');
-        let bodyText = '';
-        if (contentType && (contentType.includes('text/html') || contentType.includes('application/xhtml+xml'))) {
-          bodyText = await response.text();
-        }
-
+        const contentType = response.headers.get("content-type");
+        const outcome: LinkOutcome = response.status >= 400 ? "error" : "ok";
         return {
+          requestedUrl: startUrl,
           finalUrl: currentUrl,
-          statusCode: status,
-          redirectChain,
+          statusCode: response.status,
+          redirectChain: chain,
+          body,
           contentType,
-          bodyText,
-          durationMs: Date.now() - startTime,
+          outcome,
+          checkedAt,
         };
       }
+      return this.errorResult(startUrl, currentUrl, "error", "Redirect limit exceeded.", chain);
+    } catch (error) {
+      const timedOut = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+      return this.errorResult(
+        startUrl,
+        currentUrl,
+        timedOut ? "timeout" : "error",
+        error instanceof Error ? error.message : String(error),
+        chain,
+        checkedAt,
+      );
     }
-
-    return {
-      finalUrl: currentUrl,
-      statusCode: 310,
-      redirectChain,
-      durationMs: Date.now() - startTime,
-      error: `Exceeded maximum redirect limit of ${this.maxRedirects} hops`,
-    };
   }
 
-  private isRetryable(err: any): boolean {
-    if (!err) return false;
-    if (err.name === 'AbortError' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {
-      return true;
+  private async requestHop(
+    url: string,
+    method: "GET" | "HEAD",
+    readBody: boolean,
+  ): Promise<{ response: Response; body: string }> {
+    await this.waitForOrigin(new URL(url).origin);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method,
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": this.userAgent,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      });
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      const isText = contentType.startsWith("text/") ||
+        contentType.includes("application/xhtml+xml") ||
+        contentType.includes("application/xml") ||
+        contentType.includes("application/json");
+      const body = !readBody || method === "HEAD" || REDIRECT_CODES.has(response.status) || !isText
+        ? ""
+        : await readBodyLimited(response, this.maxBodyBytes);
+      if ((!readBody || method === "HEAD" || REDIRECT_CODES.has(response.status) || !isText) && response.body) {
+        await response.body.cancel().catch(() => undefined);
+      }
+      return { response, body };
+    } finally {
+      clearTimeout(timeout);
     }
-    return false;
+  }
+
+  private async waitForOrigin(origin: string): Promise<void> {
+    const previous = this.originTail.get(origin) ?? Promise.resolve();
+    let release!: () => void;
+    const slot = new Promise<void>((resolve) => { release = resolve; });
+    this.originTail.set(origin, previous.then(() => slot));
+    await previous;
+    const last = this.lastRequestAt.get(origin) ?? 0;
+    const minimumDelay = Math.max(this.rateLimitMs, this.originDelayMs.get(origin) ?? 0);
+    const delay = Math.max(0, last + minimumDelay - Date.now());
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    this.lastRequestAt.set(origin, Date.now());
+    release();
+  }
+
+  private errorResult(
+    requestedUrl: string,
+    finalUrl: string,
+    outcome: LinkOutcome,
+    error: string,
+    redirectChain: string[] = [requestedUrl],
+    checkedAt = new Date().toISOString(),
+  ): FetchResult {
+    return {
+      requestedUrl,
+      finalUrl,
+      statusCode: null,
+      redirectChain,
+      body: "",
+      contentType: null,
+      outcome,
+      error,
+      checkedAt,
+    };
   }
 }

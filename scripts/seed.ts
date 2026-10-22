@@ -1,5 +1,5 @@
 
-const BASE_URL = "http://localhost:4173";
+const BASE_URL = "http://localhost:3002";
 
 async function seedDemoSite() {
   console.log("FixLoop demo seed configuration");

@@ -2,17 +2,15 @@
   "name": "fixloop-broken-link-seo-crawler",
   "version": "1.0.0",
   "private": true,
-  "workspaces": [
-    "server",
-    "web"
-  ],
   "scripts": {
     "dev": "npm --prefix web run dev",
+    "dev:api": "npm --prefix server run dev",
     "build": "npm --prefix web run build",
-    "server": "npm --workspace=server run dev",
-    "web": "npm --workspace=web run dev",
-    "test": "npm --workspace=server test",
-    "test:detectors": "npm --workspace=server run test:detectors",
-    "test:crawl": "node --import tsx scripts/test-crawl.ts"
+    "build:api": "npm --prefix server run build",
+    "build:all": "npm --prefix server run build && npm --prefix web run build",
+    "test:api": "npm --prefix server test",
+    "test:demo": "npm --prefix server run test:demo",
+    "test:detectors": "npm --prefix server run test:detectors",
+    "test:crawl": "npm --prefix server run test:crawl"
   }
 }

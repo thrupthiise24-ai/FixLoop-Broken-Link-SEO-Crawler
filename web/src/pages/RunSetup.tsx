@@ -2,12 +2,13 @@
 import React, { useState } from "react";
 
 export default function RunSetup() {
-  const [siteUrl, setSiteUrl] = useState("http://localhost:4173");
+  const [siteUrl, setSiteUrl] = useState("http://127.0.0.1:3002/demo/");
   const [pageLimit, setPageLimit] = useState(200);
   const [permission, setPermission] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [runData, setRunData] = useState<any>(null);
+  const responseRunId = runData?.run_id ?? runData?.id ?? runData?.run?.id;
 
   async function startCrawl(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -71,7 +72,7 @@ export default function RunSetup() {
           <h1 style={styles.brand}>FixLoop</h1>
           <p style={styles.subtitle}>Broken Link & SEO Crawler</p>
         </div>
-        <span style={styles.headerTag}>AI-ASSISTED AUDIT</span>
+        <a href="/tests" style={styles.headerTag}>TEST RESULTS</a>
       </header>
 
       <section style={styles.hero}>
@@ -153,6 +154,11 @@ export default function RunSetup() {
               <pre style={styles.pre}>
                 {JSON.stringify(runData, null, 2)}
               </pre>
+              {responseRunId && (
+                <a href={`/run?id=${encodeURIComponent(String(responseRunId))}`} style={styles.resultLink}>
+                  Open run details and review issues →
+                </a>
+              )}
             </div>
           )}
         </section>
@@ -227,6 +233,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "11px",
     fontWeight: 700,
     letterSpacing: "1px",
+    textDecoration: "none",
   },
   hero: { maxWidth: "1100px", margin: "48px auto 28px" },
   eyebrow: {
@@ -290,6 +297,7 @@ const styles: Record<string, React.CSSProperties> = {
     overflowWrap: "anywhere",
   },
   result: { marginTop: "18px" },
+  resultLink: { display: "inline-block", marginTop: "8px", color: "#3157d5", fontWeight: 700, fontSize: "13px" },
   pre: {
     whiteSpace: "pre-wrap",
     overflowWrap: "anywhere",

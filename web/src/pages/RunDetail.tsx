@@ -14,6 +14,9 @@ type Issue = {
   status?: string;
   suggested_fix?: string;
   redirect_chain?: string[];
+  tracker_id?: string | null;
+  tracker_state?: string;
+  approved_at?: string | null;
 };
 
 type Run = {
@@ -36,12 +39,31 @@ type Run = {
   }>;
 };
 
+function isUnfiled(issue: Issue): boolean {
+  return !issue.tracker_id && !issue.approved_at;
+}
+
+function canApprove(issue: Issue): boolean {
+  return issue.status === "pending_approval" ||
+    (issue.status === "still_failing" && isUnfiled(issue));
+}
+
+function canReject(issue: Issue): boolean {
+  return canApprove(issue) || (issue.status === "uncertain" && isUnfiled(issue));
+}
+
+function canRecheck(issue: Issue): boolean {
+  return ["open", "still_failing", "uncertain"].includes(String(issue.status));
+}
+
 export default function RunDetail() {
   const [runId, setRunId] = useState("");
   const [run, setRun] = useState<Run | null>(null);
   const [issues, setIssues] = useState<Issue[]>([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
+  const [issueMessages, setIssueMessages] = useState<Record<string, string>>({});
+  const [busyIssueId, setBusyIssueId] = useState<string | null>(null);
 
   async function loadRun(id: string) {
     if (!id.trim()) {
@@ -89,14 +111,15 @@ export default function RunDetail() {
     issueId: string | number,
     action: "approve" | "reject" | "recheck"
   ) {
-    setMessage("");
+    const key = String(issueId);
+    setBusyIssueId(key);
+    setIssueMessages((current) => ({ ...current, [key]: `Submitting ${action}…` }));
 
     try {
       const response = await fetch(
-        `/api/issues/${encodeURIComponent(String(issueId))}/${action}`,
+        `/api/issues/${encodeURIComponent(key)}/${action}`,
         { method: "POST" }
       );
-
       const result = await response.json().catch(() => ({}));
 
       if (!response.ok) {
@@ -105,12 +128,22 @@ export default function RunDetail() {
         );
       }
 
-      setMessage(`Issue ${action} request completed.`);
       if (runId) await loadRun(runId);
+      setIssueMessages((current) => ({
+        ...current,
+        [key]: typeof result.message === "string"
+          ? result.message
+          : `Issue ${action} completed successfully.`,
+      }));
     } catch (error) {
-      setMessage(
-        error instanceof Error ? error.message : "Action failed."
-      );
+      setIssueMessages((current) => ({
+        ...current,
+        [key]: error instanceof Error
+          ? `${action} failed: ${error.message}`
+          : `Unable to ${action} issue.`,
+      }));
+    } finally {
+      setBusyIssueId(null);
     }
   }
 
@@ -122,6 +155,14 @@ export default function RunDetail() {
       void loadRun(id);
     }
   }, []);
+
+  useEffect(() => {
+    if (!runId || !run || !["queued", "running"].includes(String(run.status))) return;
+    const timer = window.setTimeout(() => void loadRun(runId), 1000);
+    return () => window.clearTimeout(timer);
+    // Depend on the run object, not just its status: each load returns a new
+    // object, so the timeout is rescheduled and polling keeps running.
+  }, [runId, run]);
 
   const groupedIssues = issues.reduce<Record<string, Issue[]>>(
     (groups, issue) => {
@@ -284,25 +325,42 @@ export default function RunDetail() {
                       )}
 
                       <div style={styles.actions}>
-                        <button
-                          style={styles.approve}
-                          onClick={() => void updateIssue(issue.id, "approve")}
-                        >
-                          Approve
-                        </button>
-                        <button
-                          style={styles.reject}
-                          onClick={() => void updateIssue(issue.id, "reject")}
-                        >
-                          Reject
-                        </button>
-                        <button
-                          style={styles.secondary}
-                          onClick={() => void updateIssue(issue.id, "recheck")}
-                        >
-                          Recheck
-                        </button>
+                        {canApprove(issue) && (
+                          <button
+                            type="button"
+                            style={styles.approve}
+                            disabled={busyIssueId !== null}
+                            onClick={() => void updateIssue(issue.id, "approve")}
+                          >
+                            {busyIssueId === String(issue.id) ? "Approving…" : "Approve"}
+                          </button>
+                        )}
+                        {canReject(issue) && (
+                          <button
+                            type="button"
+                            style={styles.reject}
+                            disabled={busyIssueId !== null}
+                            onClick={() => void updateIssue(issue.id, "reject")}
+                          >
+                            {busyIssueId === String(issue.id) ? "Rejecting…" : "Reject"}
+                          </button>
+                        )}
+                        {canRecheck(issue) && (
+                          <button
+                            type="button"
+                            style={styles.secondary}
+                            disabled={busyIssueId !== null}
+                            onClick={() => void updateIssue(issue.id, "recheck")}
+                          >
+                            {busyIssueId === String(issue.id) ? "Rechecking…" : "Recheck"}
+                          </button>
+                        )}
                       </div>
+                      {issueMessages[String(issue.id)] && (
+                        <p role="status" style={styles.actionMessage}>
+                          {issueMessages[String(issue.id)]}
+                        </p>
+                      )}
                     </article>
                   ))}
                 </div>
@@ -378,6 +436,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
   },
   message: { color: "#3157d5", fontSize: "13px", overflowWrap: "anywhere" },
+  actionMessage: {
+    margin: "12px 0 0",
+    padding: "10px 12px",
+    borderRadius: "7px",
+    background: "#edf1ff",
+    color: "#2447bd",
+    fontSize: "13px",
+    lineHeight: 1.5,
+    overflowWrap: "anywhere",
+  },
   metrics: {
     maxWidth: "1100px",
     margin: "20px auto",

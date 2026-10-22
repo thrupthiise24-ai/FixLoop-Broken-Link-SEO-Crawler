@@ -1,88 +1,61 @@
-import * as cheerio from 'cheerio';
-import { PageParseResult } from '../../../shared/types.js';
+import { load } from "cheerio";
+import { isSameOrigin, normalizeUrl } from "./normalizeUrl";
 
-/**
- * Parses HTML document and extracts links, title, meta tags, headings, and images.
- */
-export function parseHtml(html: string, pageUrl: string): PageParseResult {
-  const result: PageParseResult = {
-    url: pageUrl,
-    h1_tags: [],
-    links: [],
-    images: [],
+export interface ParsedLink {
+  url: string;
+  text: string;
+  internal: boolean;
+  isNavigation: boolean;
+}
+
+export interface ParsedPage {
+  title: string | null;
+  metaDescription: string | null;
+  h1Count: number;
+  imagesMissingAlt: string[];
+  links: ParsedLink[];
+}
+
+function cleanText(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  return cleaned || null;
+}
+
+export function parseHtml(html: string, pageUrl: string): ParsedPage {
+  const $ = load(html);
+  const title = cleanText($("title").first().text());
+  const metaDescription = cleanText(
+    $("meta[name='description' i]").first().attr("content"),
+  );
+  const links: ParsedLink[] = [];
+  const seenLinks = new Set<string>();
+
+  $("a[href]").each((_, element) => {
+    const href = $(element).attr("href") ?? "";
+    const url = normalizeUrl(href, pageUrl);
+    if (!url || seenLinks.has(url)) return;
+    seenLinks.add(url);
+    links.push({
+      url,
+      text: cleanText($(element).text()) ?? "",
+      internal: isSameOrigin(url, pageUrl),
+      isNavigation: $(element).closest("nav, header").length > 0,
+    });
+  });
+
+  const imagesMissingAlt: string[] = [];
+  $("img").each((index, element) => {
+    if (Object.prototype.hasOwnProperty.call(element.attribs ?? {}, "alt")) return;
+    const src = $(element).attr("src") ?? $(element).attr("data-src") ?? "";
+    imagesMissingAlt.push(normalizeUrl(src, pageUrl) ?? `${pageUrl}#image-${index + 1}`);
+  });
+
+  return {
+    title,
+    metaDescription,
+    h1Count: $("h1").length,
+    imagesMissingAlt,
+    links,
   };
-
-  if (!html || typeof html !== 'string') {
-    return result;
-  }
-
-  try {
-    const $ = cheerio.load(html);
-
-    // 1. Extract Title
-    const title = $('title').first().text().trim();
-    if (title) {
-      result.title = title;
-    }
-
-    // 2. Extract Meta Description
-    const metaDescription =
-      $('meta[name="description" i]').attr('content') ||
-      $('meta[property="og:description" i]').attr('content');
-    if (metaDescription) {
-      result.meta_description = metaDescription.trim();
-    }
-
-    // 3. Extract H1 Headings
-    $('h1').each((_, el) => {
-      const text = $(el).text().trim();
-      if (text) {
-        result.h1_tags.push(text);
-      }
-    });
-
-    // 4. Extract Links
-    $('a[href]').each((_, el) => {
-      const href = $(el).attr('href');
-      if (!href) return;
-
-      const text = $(el).text().trim();
-      // Check if inside nav, header, or footer navigation
-      const isNav =
-        $(el).closest('nav').length > 0 ||
-        $(el).closest('header').length > 0 ||
-        $(el).closest('[role="navigation"]').length > 0 ||
-        $(el).hasClass('nav-link') ||
-        $(el).parents('.navbar, .navigation, .nav, .menu').length > 0;
-
-      result.links.push({
-        href: href.trim(),
-        text: text,
-        isNav: Boolean(isNav),
-      });
-    });
-
-    // 5. Extract Images
-    $('img').each((_, el) => {
-      const src = $(el).attr('src');
-      if (!src) return;
-
-      const altAttr = $(el).attr('alt');
-      const hasAlt = typeof altAttr === 'string';
-
-      result.images.push({
-        src: src.trim(),
-        alt: hasAlt ? altAttr.trim() : undefined,
-        hasAlt,
-      });
-    });
-  } catch (err: any) {
-    // Basic regex fallback if parser encounters an unexpected error
-    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-    if (titleMatch) {
-      result.title = titleMatch[1].trim();
-    }
-  }
-
-  return result;
 }
