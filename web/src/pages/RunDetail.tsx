@@ -160,7 +160,9 @@ export default function RunDetail() {
     if (!runId || !run || !["queued", "running"].includes(String(run.status))) return;
     const timer = window.setTimeout(() => void loadRun(runId), 1000);
     return () => window.clearTimeout(timer);
-  }, [runId, run?.status]);
+    // Depend on the run object, not just its status: each load returns a new
+    // object, so the timeout is rescheduled and polling keeps running.
+  }, [runId, run]);
 
   const groupedIssues = issues.reduce<Record<string, Issue[]>>(
     (groups, issue) => {

@@ -49,6 +49,12 @@ export function createApp(deps: AppDependencies): Express {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "1mb" }));
+  // Run state changes constantly; browsers must not heuristically cache API JSON
+  // or the run-detail page's own polling would keep serving the stale body.
+  app.use("/api", (_request: Request, response: Response, next: NextFunction) => {
+    response.setHeader("Cache-Control", "no-store");
+    next();
+  });
   app.get("/", (request, response) => {
     const appUrl = appPreviewUrl(request);
     if (appUrl) {
