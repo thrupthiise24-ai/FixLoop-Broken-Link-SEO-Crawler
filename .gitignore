@@ -4,6 +4,9 @@ build/
 .env
 *.db
 *.sqlite
+*.sqlite-*
+data/
+server/data/
 *.log
 .DS_Store
 .vscode/

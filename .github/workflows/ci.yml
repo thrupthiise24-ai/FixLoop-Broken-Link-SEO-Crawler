@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+      - name: Run backend and end-to-end tests
+        working-directory: server
+        run: npm test
+      - name: Build backend
+        working-directory: server
+        run: npm run build
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Build web
+        working-directory: web
+        run: npm run build

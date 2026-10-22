@@ -5,6 +5,11 @@
   "private": true,
   "scripts": {
     "dev": "npm --prefix web run dev",
-    "build": "npm --prefix web run build"
+    "dev:api": "npm --prefix server run dev",
+    "build": "npm --prefix web run build",
+    "build:api": "npm --prefix server run build",
+    "build:all": "npm --prefix server run build && npm --prefix web run build",
+    "test:api": "npm --prefix server test",
+    "test:demo": "npm --prefix server run test:demo"
   }
 }

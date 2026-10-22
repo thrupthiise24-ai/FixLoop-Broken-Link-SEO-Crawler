@@ -1,0 +1,16 @@
+{
+  "id": "TC1",
+  "name": "Detect internal broken link",
+  "input": "Crawl http://127.0.0.1:3002/demo/; /about links to /missing-page.",
+  "expected": "Create an issue naming /about as the source and record HTTP 404 for /missing-page.",
+  "actual": "Found broken_link from http://127.0.0.1:3002/demo/about to http://127.0.0.1:3002/demo/missing-page; HTTP 404.",
+  "status": "PASS",
+  "evidence": [
+    "Issue ID: 36e3f99f-c93b-4e23-9a25-8705231ed5ba",
+    "Source page: http://127.0.0.1:3002/demo/about",
+    "Bad URL: http://127.0.0.1:3002/demo/missing-page",
+    "Status code: 404"
+  ],
+  "runId": "5ebbee90-0557-4ac5-82c3-96d91a7fffcc",
+  "generatedAt": "2026-10-22T14:45:01.931Z"
+}
