@@ -1,5 +1,5 @@
 {
-  "name": "broken-link-seo-crawler",
+  "name": "fixloop-broken-link-seo-crawler",
   "version": "1.0.0",
   "private": true,
   "workspaces": [
@@ -7,6 +7,8 @@
     "web"
   ],
   "scripts": {
+    "dev": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
     "server": "npm --workspace=server run dev",
     "web": "npm --workspace=web run dev",
     "test": "npm --workspace=server test",
